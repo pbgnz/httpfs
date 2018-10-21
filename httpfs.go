@@ -7,6 +7,8 @@ import (
 	"log"
 	"net"
 	"os"
+	"regexp"
+	"strings"
 )
 
 var (
@@ -41,7 +43,7 @@ func main() {
 		}
 
 		if *verbose {
-			log.Println("Connected to", conn.RemoteAddr())
+			fmt.Println("Connected to ", conn.RemoteAddr())
 		}
 
 		go handleConnection(conn)
@@ -56,13 +58,25 @@ func handleConnection(conn net.Conn) {
 		log.Printf("Error reading the request: %v", err)
 		return
 	}
-	log.Println(req)
+	log.Print(req)
+}
+
+type Request struct {
+	Method   string
+	Path     string
+	Headers  map[string]string
+	Protocol string
 }
 
 func handleRequest(conn net.Conn) (*Request, error) {
 	defer conn.Close()
 
-	requestLine, err := bufio.NewReader(conn).ReadString('\n')
+	req := &Request{
+		Headers: map[string]string{},
+	}
+
+	request := bufio.NewReader(conn)
+	requestLine, err := request.ReadString('\n')
 	if err != nil {
 		return nil, fmt.Errorf("Error in the request line: %v", err)
 	}
@@ -71,5 +85,35 @@ func handleRequest(conn net.Conn) (*Request, error) {
 		fmt.Println(requestLine)
 	}
 
-	return nil, nil
+	rl := strings.Fields(requestLine)
+	if len(rl) != 3 {
+		return nil, fmt.Errorf("Error in the request line %v", err)
+	}
+
+	if rl[0] == "GET" || rl[0] == "POST" {
+		req.Method = rl[0]
+	} else {
+		return nil, fmt.Errorf("Error in the request method %v", err)
+	}
+	req.Path = rl[1]
+	req.Protocol = rl[2]
+
+	for {
+		headerLine, err := request.ReadString('\n')
+		if err != nil {
+			return nil, fmt.Errorf("Error in the header line %v", err)
+		}
+		if *verbose {
+			fmt.Println(headerLine)
+		}
+		if headerLine == "\r\n" {
+			break
+		}
+		parts := regexp.MustCompile(`^([\w-]+): (.+)\r\n$`).FindStringSubmatch(headerLine)
+		if len(parts) != 3 {
+			return nil, fmt.Errorf("Error in the header lines %v", err)
+		}
+		req.Headers[parts[1]] = parts[2]
+	}
+	return req, nil
 }
