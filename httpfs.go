@@ -4,18 +4,32 @@ import (
 	"bufio"
 	"flag"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"net"
 	"os"
 	"regexp"
 	"strings"
+	"time"
 )
 
 var (
-	verbose = flag.Bool("v", false, "Prints debugging messages.")
-	port    = flag.Int("p", 8080, "Specifies the port number that the server will listen and serve at.")
-	// directory = flag.String("d", "", "Specifies the directory that the server will use to read/write requested files.")
+	verbose   = flag.Bool("v", false, "Prints debugging messages.")
+	port      = flag.Int("p", 8080, "Specifies the port number that the server will listen and serve at.")
+	directory = flag.String("d", ".", "Specifies the directory that the server will use to read/write requested files.")
 )
+
+type Request struct {
+	Method   string
+	Path     string
+	Headers  map[string]string
+	Protocol string
+}
+
+type Response struct {
+	headers map[string]string
+	status  int
+}
 
 func main() {
 	flag.Parse()
@@ -53,19 +67,31 @@ func main() {
 func handleConnection(conn net.Conn) {
 	defer conn.Close()
 
+	// handle the client's request
 	req, err := handleRequest(conn)
 	if err != nil {
 		log.Printf("Error reading the request: %v", err)
 		return
 	}
-	log.Print(req)
-}
 
-type Request struct {
-	Method   string
-	Path     string
-	Headers  map[string]string
-	Protocol string
+	// prepare the response
+	res := &Response{
+		headers: map[string]string{},
+	}
+	// default headers
+	res.status = 200
+	res.headers["Date"] = time.Now().Format(time.UnixDate)
+	res.headers["Connection"] = "close"
+
+	if req.Method == "GET" {
+		if req.Path == "/" {
+			files, err := readDirectory(*directory)
+			if err != nil {
+				return
+			}
+			fmt.Println(files)
+		}
+	}
 }
 
 func handleRequest(conn net.Conn) (*Request, error) {
@@ -76,6 +102,8 @@ func handleRequest(conn net.Conn) (*Request, error) {
 	}
 
 	request := bufio.NewReader(conn)
+
+	// parse the request line
 	requestLine, err := request.ReadString('\n')
 	if err != nil {
 		return nil, fmt.Errorf("Error in the request line: %v", err)
@@ -98,6 +126,7 @@ func handleRequest(conn net.Conn) (*Request, error) {
 	req.Path = rl[1]
 	req.Protocol = rl[2]
 
+	// parse the headers
 	for {
 		headerLine, err := request.ReadString('\n')
 		if err != nil {
@@ -116,4 +145,18 @@ func handleRequest(conn net.Conn) (*Request, error) {
 		req.Headers[parts[1]] = parts[2]
 	}
 	return req, nil
+}
+
+func readDirectory(d string) ([]string, error) {
+	files, err := ioutil.ReadDir(d)
+	if err != nil {
+		return nil, fmt.Errorf("Error reading the directory %v", err)
+	}
+	fileList := []string{}
+	for _, file := range files {
+		if !file.IsDir() {
+			fileList = append(fileList, file.Name())
+		}
+	}
+	return fileList, nil
 }
