@@ -1,16 +1,15 @@
 package main
 
 import (
-	"bufio"
 	"flag"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"log"
 	"net"
 	"os"
-	"regexp"
+	"strconv"
 	"strings"
-	"time"
 )
 
 var (
@@ -19,132 +18,109 @@ var (
 	directory = flag.String("d", ".", "Specifies the directory that the server will use to read/write requested files.")
 )
 
-type Request struct {
-	Method   string
-	Path     string
-	Headers  map[string]string
-	Protocol string
-}
-
-type Response struct {
-	headers map[string]string
-	status  int
-}
-
 func main() {
 	flag.Parse()
 
-	addr := fmt.Sprintf(":%d", *port)
-	listener, err := net.Listen("tcp", addr)
+	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", *port))
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: failed to listen %s with %v\n", addr, err)
-		return
+		log.Fatalf("Error listening on port %d: %v", *port, err)
 	}
-
 	defer listener.Close()
-	fmt.Println("httpfs is listening at", listener.Addr())
+
+	if *verbose {
+		fmt.Println("httpfs is running in verbose mode")
+	}
 
 	// connection-loop:
 	// handle incomming requests
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
-			fmt.Println(err)
-			if err := conn.Close(); err != nil {
-				log.Println("Error: failed to close listener:", err)
-			}
+			fmt.Printf("Error accepting connection: %v", err)
 			continue
 		}
-
 		if *verbose {
+			fmt.Print("\n")
 			fmt.Println("Connected to ", conn.RemoteAddr())
+			fmt.Print("\n")
 		}
-
 		go handleConnection(conn)
 	}
+
 }
 
 func handleConnection(conn net.Conn) {
 	defer conn.Close()
 
-	// handle the client's request
-	req, err := handleRequest(conn)
+	req, err := NewRequest(conn)
 	if err != nil {
 		log.Printf("Error reading the request: %v", err)
 		return
 	}
 
-	// prepare the response
-	res := &Response{
-		headers: map[string]string{},
-	}
-	// default headers
-	res.status = 200
-	res.headers["Date"] = time.Now().Format(time.UnixDate)
-	res.headers["Connection"] = "close"
+	res := NewResponse(conn)
+	filepath := *directory + req.Path
 
 	if req.Method == "GET" {
 		if req.Path == "/" {
 			files, err := readDirectory(*directory)
 			if err != nil {
+				log.Printf("Error could not read directory: %v", err)
 				return
 			}
-			fmt.Println(files)
+			if err = res.Send(200, strings.Join(files, "\r\n")+"\r\n", ""); err != nil {
+				log.Printf("Error could not send response: %v", err)
+			}
+		} else {
+			if err = res.Send(200, "", filepath); err != nil {
+				log.Printf("Error could not send response: %v", err)
+			}
 		}
-	}
-}
+	} else if req.Method == "POST" {
+		if req.Path == "/" {
+			if err = res.Send(400, "BAD REQUEST: need to pick filename\r\n", ""); err != nil {
+				log.Printf("Error could not send response: %v", err)
+			}
+			return
+		}
 
-func handleRequest(conn net.Conn) (*Request, error) {
-	defer conn.Close()
+		if _, val := req.Headers["Content-Length"]; !val {
+			if err = res.Send(400, "Content-Length header is required", ""); err != nil {
+				log.Printf("Error could not send response: %v", err)
+			}
+			return
+		}
 
-	req := &Request{
-		Headers: map[string]string{},
-	}
-
-	request := bufio.NewReader(conn)
-
-	// parse the request line
-	requestLine, err := request.ReadString('\n')
-	if err != nil {
-		return nil, fmt.Errorf("Error in the request line: %v", err)
-	}
-
-	if *verbose {
-		fmt.Println(requestLine)
-	}
-
-	rl := strings.Fields(requestLine)
-	if len(rl) != 3 {
-		return nil, fmt.Errorf("Error in the request line %v", err)
-	}
-
-	if rl[0] == "GET" || rl[0] == "POST" {
-		req.Method = rl[0]
-	} else {
-		return nil, fmt.Errorf("Error in the request method %v", err)
-	}
-	req.Path = rl[1]
-	req.Protocol = rl[2]
-
-	// parse the headers
-	for {
-		headerLine, err := request.ReadString('\n')
+		l, err := strconv.Atoi(req.Headers["Content-Length"])
 		if err != nil {
-			return nil, fmt.Errorf("Error in the header line %v", err)
+			log.Printf("Error could not read content-length: %v. value: %v", err, req.Headers["Content-Length"])
+			return
 		}
+
+		f, err := os.Create(filepath)
+		if err != nil {
+			log.Printf("Error could not open file %s for writing: %v", req.Path[1:], err)
+			return
+		}
+		defer f.Close()
+
+		var r io.Reader
 		if *verbose {
-			fmt.Println(headerLine)
+			r = io.TeeReader(req, os.Stdout)
+		} else {
+			r = req
 		}
-		if headerLine == "\r\n" {
-			break
+
+		if _, err = io.CopyN(f, r, int64(l)); err != nil {
+			log.Printf("Error writing to file: %v", err)
+			return
 		}
-		parts := regexp.MustCompile(`^([\w-]+): (.+)\r\n$`).FindStringSubmatch(headerLine)
-		if len(parts) != 3 {
-			return nil, fmt.Errorf("Error in the header lines %v", err)
+
+		if err = res.SendStatus(200); err != nil {
+			log.Printf("could not send response: %v", err)
 		}
-		req.Headers[parts[1]] = parts[2]
+
 	}
-	return req, nil
 }
 
 func readDirectory(d string) ([]string, error) {
