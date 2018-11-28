@@ -4,6 +4,11 @@ httpfs is a simple file server
 ## Requirements
 1. Go 1.7 or later
 
+## Installation
+``` bash
+go get -u github.com/pbgnz/httpfs
+```
+
 ## Detailed Usage
 
 ### General
